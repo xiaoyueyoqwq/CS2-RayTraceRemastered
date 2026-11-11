@@ -1,0 +1,18 @@
+{
+  "GetGameTraceManager": {
+    "signatures": {
+      "library": "server",
+      "linux": "48 8B 3D ? ? ? ? E8 ? ? ? ? 5A",
+      "windows": "48 8B 0D ? ? ? ? 4D 8B C6 88 44 24 ?"
+    },
+    "comment": "mov rdi,[rip+X] loading g_pGameTraceManager; resolve (insn+7+disp32@+3) then deref. Verified 14196 unique-match."
+  },
+  "UTIL_TraceShape": {
+    "signatures": {
+      "library": "server",
+      "linux": "55 48 8D 05 ? ? ? ? 48 89 E5 41 57 49 89 F7 41 56 48 8D 35 ? ? ? ? 49 89 CE",
+      "windows": "48 89 54 24 ? 48 89 4C 24 ? 55 53 56 57 41 54 41 56 41 57"
+    },
+    "comment": "bool UTIL_TraceShape(gtm, Ray_t*, start, end, CTraceFilter*, CGameTrace*) — 6 arg prologue. Verified 14196 unique-match."
+  }
+}
