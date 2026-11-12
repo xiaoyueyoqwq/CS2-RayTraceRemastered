@@ -1,28 +1,82 @@
 # CS2-RayTraceRemastered
 
-重构 Slynx 的 `RayTrace` Metamod 插件（部署件 `v1.0.15 @ e136f9a`，上游源码不可寻）——目标是做一个 **API-18 兼容、对 1.41.9.6 签名有效**的等价物，保持 `CRayTraceInterface` 契约不变，让现有 `RayTraceApi.dll` 消费方（bot 生态）无需改动。
+English | [简体中文](README.zh-CN.md)
 
-## 已锁定的信息
+A [Metamod:Source](https://www.metamodsource.net/) plugin for Counter-Strike 2 dedicated servers. It is a source-available, ABI-compatible rebuild of Slynx's `RayTrace` plugin (deployed build `v1.0.15 @ e136f9a`, upstream source unavailable). It registers the same `CRayTraceInterface002` interface through MetaMod's MetaFactory mechanism, so existing managed consumers (`RayTraceApi.dll` / `RayTraceImpl.dll`, and the `raytrace:craytraceinterface` plugin capability) keep working without modification.
 
-- 完整托管契约：`docs/CONTRACT.md`（反编译自线上 `RayTraceApi.dll`）
-- 引擎层 trace 实现参考：`~/project/CS2TraceRay`（SlynxCZ 公开的 C# 库，示范了用 `NativeAPI.FindSignature` 直调 `GameTraceManager`/`TraceShape`/`CTraceFilterVtable` 的路径——原生侧用同一批引擎函数）
-- 部署 gamedata 4 条里 3 条仍命中新二进制，`AcceptInput` 断——上游 CSS gamedata 同名签名可直接抄
+Verified in production on CS2 `1.41.9.6` with MetaMod API 18 — `meta list` shows `RayTrace (v1.0.15-remaster)`.
 
-## 待确认项（写码前）
+## How it works
 
-1. ~~接口发现机制~~ 已钉死：MetaFactory 注册名 `CRayTraceInterface002`，vtable 槽 2-5（详见 docs/BINDING.md）
-2. **实体探针路径**：部署件引用了 `CreateEntityByName`/`DispatchSpawn`/`AcceptInput`/`AddEntityIOEvent`——大概率是 spawn 临时实体做 hull/trigger 碰撞探针；重写时要么复刻要么用 `GameTraceManager` 的 shape trace 替代（优先替代，少一条实体链）
-3. **构建环境**：ambuild/cmake + hl2sdk-cs2（`.codex/deps` 有）+ MM ≥ API18 头文件
+- On load, the plugin locates `gamedata.json` relative to its own `.so` path, signature-scans `libserver.so` for `UTIL_TraceShape` and `GetGameTraceManager`, then resolves the `g_pGameTraceManager` global via a RIP-relative dereference.
+- It registers an `IMetamodListener` and answers `OnMetamodQuery("CRayTraceInterface002")` with a global singleton implementing the interface.
+- All four trace methods build a native `Ray_t` / `CTraceFilter` from the managed `TraceOptions`, call the engine's `UTIL_TraceShape(gtm, ray, start, end, filter, CGameTrace*)`, and map `CGameTrace` onto the managed `TraceResult` layout — no temporary probe entities are spawned.
+- `TraceOptions.interactsWith` / `interactsExclude` are written to `CTraceFilter::m_nInteractsWith` / `m_nInteractsExclude`; the `ignore` entity (if any) is placed into `m_nEntityIdsToIgnore[0]`.
 
-## 方向
+## Interface contract
 
-写一个新 metamod 插件（C++），加载时注册同名 `CRayTraceInterface` 实现：
+The managed side resolves `Utilities.MetaFactory("CRayTraceInterface002")` and binds vtable slots `2..5` on Linux (`1..4` on Windows — the Itanium ABI uses two slots for the virtual destructor):
 
-- `TraceShape` / `TraceEndShape` / `TraceHullShape` / `TraceShapeEx` → `GameTraceManager::TraceShape`（引擎原生，签名已验）
-- 按 `docs/CONTRACT.md` 的 ABI 逐字节匹配 TraceOptions/TraceResult 内存布局
-- gamedata 只需要它真正用到的签名；`AcceptInput` 若还需要，从上游 CSS gamedata 借
+| Slot (linux/win) | Method | Purpose |
+|---|---|---|
+| 2 / 1 | `TraceShape(start, angles, ignore, options, out result)` | Directional ray trace, fixed 8192-unit range |
+| 3 / 2 | `TraceEndShape(start, end, ignore, options, out result)` | Ray trace between two points |
+| 4 / 3 | `TraceHullShape(start, end, mins, maxs, ignore, options, out result)` | Hull (box) trace |
+| 5 / 4 | `TraceShapeEx(start, end, filter, ray, out result)` | Caller-supplied `CTraceFilter*` / `Ray_t*` |
 
-## 约束
+`TraceOptions` (24 bytes) and `TraceResult` (44 bytes) are byte-compatible mirrors of the managed `ExplicitLayout` structs. The full ABI is documented in `docs/CONTRACT.md`; the MetaFactory binding mechanism is documented in `docs/BINDING.md`. Decompiled reference sources of the managed assemblies are in `docs/*.decompiled.cs`.
 
-- 不向任何上游送 PR；这是本地重构件
-- 部署前先在空服验证 `meta list` 加载 + 消费插件 `botidentity:api`-style 取接口成功
+## Deployment
+
+Layout relative to the game directory:
+
+```
+addons/RayTrace/
+├── bin/linuxsteamrt64/RayTrace.so   # this plugin
+└── gamedata.json                    # signature database
+```
+
+- Register the plugin in `addons/metamod/metaplugins.ini` like any other MetaMod plugin (path to `addons/RayTrace/bin/linuxsteamrt64/RayTrace.so`).
+- `gamedata.json` is resolved relative to the `.so` location (`addons/<name>/gamedata.json`), so it must sit in the addon root.
+- Only the two signatures shipped in `gamedata/gamedata.json` (`UTIL_TraceShape`, `GetGameTraceManager`) are required — both verified unique-match on build 14196. Extra entries (e.g. the legacy entity-probe signatures carried by older deployments) are ignored.
+- On successful load the console prints `[RayTraceRemastered] loaded: gtm=0x… util=0x…` and `meta list` shows `RayTrace (v1.0.15-remaster) by xiaoyueyoqwq (remaster)`.
+
+## Building (Linux only)
+
+Requirements:
+
+- `hl2sdk-cs2` (with protobuf 3.21.8 under `thirdparty/`)
+- `metamod-source` headers (API 18; the plugin uses no SourceHook/KHook hooks — only `OnMetamodQuery`)
+- `protoc` plus the CS2 `.proto` sources (listed in `CMakeLists.txt`)
+
+```bash
+export HL2SDKCS2=/path/to/hl2sdk-cs2 \
+       MMSOURCE_DEV=/path/to/metamod-source \
+       CSGO_PROTO=/path/to/hl2sdk-cs2 \
+       PROTOC=/path/to/protoc
+cmake -B build && cmake --build build -j
+# → build/RayTrace.so
+```
+
+Notes:
+
+- Windows build is not wired up in `CMakeLists.txt` (the gamedata already carries windows signatures, but only the Linux build has been produced and deployed).
+- `src/plugin.cpp` exports minimal `sqrtf` / `atan2f` / `asinf` / `acosf` / `sin` / `cos` implementations so the binary loads on servers whose glibc is older than the build host's (no references to newer versioned libm symbols).
+
+## Known limitations
+
+- `TraceOptions.drawBeam` is accepted but not implemented (the original presumably rendered a debug beam).
+- `TraceShape`'s trace distance is hardcoded to 8192 units (following the CS2TraceRay convention; the original constant is unknown).
+- On signature mismatch (e.g. after a game update breaks the gamedata) `Load` fails with a console error instead of loading half-bound.
+
+## Repository layout
+
+- `src/plugin.cpp` — plugin entry point, MetaFactory listener, trace implementations
+- `src/CRayTraceInterface002.h` — interface and POD layouts (must match the managed ABI byte-for-byte)
+- `src/common/sig_scan.*` — module enumeration, pattern scanning, gamedata loader
+- `gamedata/gamedata.json` — engine signatures
+- `docs/` — ABI contract, binding notes, decompiled managed sources, development/deployment log (`STATUS.md`)
+
+## License
+
+GPL-3.0
